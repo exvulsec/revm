@@ -2444,6 +2444,9 @@ name = "revme"
 version = "0.2.0"
 dependencies = [
  "alloy-rlp",
+ "ethers-core",
+ "ethers-providers",
+ "futures",
  "hash-db",
  "hashbrown",
  "indicatif",
@@ -2453,6 +2456,7 @@ dependencies = [
  "serde_json",
  "structopt",
  "thiserror",
+ "tokio",
  "triehash",
  "walkdir",
 ]
