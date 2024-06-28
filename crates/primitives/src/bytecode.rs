@@ -70,7 +70,10 @@ impl Bytecode {
     /// Creates a new raw [`Bytecode`].
     #[inline]
     pub fn new_raw(bytecode: Bytes) -> Self {
-        Self::LegacyRaw(bytecode)
+        match Eof::decode(bytecode.clone()) {
+            Ok(eof) => Self::Eof(eof.into()),
+            Err(_) => Self::LegacyRaw(bytecode),
+        }
     }
 
     /// Create new checked bytecode.
