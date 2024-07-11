@@ -24,6 +24,7 @@ all = "warn"
 [dependencies]
 revm-primitives = { path = "../primitives", version = "6.0.0", default-features = false }
 once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
+cfg-if = "1.0"
 
 # ecRecover
 k256 = { version = "0.13.3", default-features = false, features = ["ecdsa"] }
@@ -42,7 +43,7 @@ ripemd = { version = "0.1", default-features = false }
 aurora-engine-modexp = { version = "1.1", default-features = false }
 
 # ecAdd, ecMul, ecPairing
-bn = { package = "substrate-bn", version = "0.6", default-features = false }
+eth_pairings = { git = "https://github.com/matter-labs/eip1962", default-features = false, features = ["eip_196"] }
 
 # KZG point evaluation precompile
 c-kzg = { version = "1.0.2", default-features = false, optional = true }
@@ -54,6 +55,9 @@ kzg-rs = { version = "0.1", default-features = false, features = [
 
 # BLS12-381 precompiles
 blst = { version = "0.3.12", optional = true }
+
+# ecAdd, ecMul, ecPairing
+bn = { package = "substrate-bn", version = "0.6", default-features = false, optional = true }
 
 # p256verify precompile
 p256 = { version = "0.13.2", optional = true, default-features = false, features = [
@@ -85,6 +89,7 @@ std = [
 ]
 hashbrown = ["revm-primitives/hashbrown"]
 asm-keccak = ["revm-primitives/asm-keccak"]
+bn = ["dep:bn"]
 
 optimism = ["revm-primitives/optimism", "secp256r1"]
 # Optimism default handler enabled Optimism handler register by default in EvmBuilder.

@@ -1,9 +1,6 @@
-use crate::{
-    utilities::{bool_to_bytes32, right_pad},
-    Address, Error, Precompile, PrecompileResult, PrecompileWithAddress,
-};
-use bn::{AffineG1, AffineG2, Fq, Fq2, Group, Gt, G1, G2};
-use revm_primitives::PrecompileOutput;
+//! Precompiles for the "alt-bn128" curve.
+
+use crate::{Address, Precompile, PrecompileResult, PrecompileWithAddress};
 
 pub mod add {
     use super::*;
@@ -75,88 +72,29 @@ pub mod pair {
     );
 }
 
-/// Input length for the add operation.
-/// `ADD` takes two uncompressed G1 points (64 bytes each).
-pub const ADD_INPUT_LEN: usize = 64 + 64;
-
-/// Input length for the multiplication operation.
-/// `MUL` takes an uncompressed G1 point (64 bytes) and scalar (32 bytes).
-pub const MUL_INPUT_LEN: usize = 64 + 32;
-
 /// Pair element length.
 /// `PAIR` elements are composed of an uncompressed G1 point (64 bytes) and an uncompressed G2 point
 /// (128 bytes).
 pub const PAIR_ELEMENT_LEN: usize = 64 + 128;
 
-/// Reads a single `Fq` from the input slice.
-///
-/// # Panics
-///
-/// Panics if the input is not at least 32 bytes long.
-#[inline]
-pub fn read_fq(input: &[u8]) -> Result<Fq, Error> {
-    Fq::from_slice(&input[..32]).map_err(|_| Error::Bn128FieldPointNotAMember)
-}
-
-/// Reads the `x` and `y` points from the input slice.
-///
-/// # Panics
-///
-/// Panics if the input is not at least 64 bytes long.
-#[inline]
-pub fn read_point(input: &[u8]) -> Result<G1, Error> {
-    let px = read_fq(&input[0..32])?;
-    let py = read_fq(&input[32..64])?;
-    new_g1_point(px, py)
-}
-
-/// Creates a new `G1` point from the given `x` and `y` coordinates.
-pub fn new_g1_point(px: Fq, py: Fq) -> Result<G1, Error> {
-    if px == Fq::zero() && py == Fq::zero() {
-        Ok(G1::zero())
-    } else {
-        AffineG1::new(px, py)
-            .map(Into::into)
-            .map_err(|_| Error::Bn128AffineGFailedToCreate)
-    }
-}
-
 pub fn run_add(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
-    if gas_cost > gas_limit {
-        return Err(Error::OutOfGas.into());
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "bn")] {
+            bn::run_add(input, gas_cost, gas_limit)
+        } else {
+            matter_labs::run_add(input, gas_cost, gas_limit)
+        }
     }
-
-    let input = right_pad::<ADD_INPUT_LEN>(input);
-
-    let p1 = read_point(&input[..64])?;
-    let p2 = read_point(&input[64..])?;
-
-    let mut output = [0u8; 64];
-    if let Some(sum) = AffineG1::from_jacobian(p1 + p2) {
-        sum.x().to_big_endian(&mut output[..32]).unwrap();
-        sum.y().to_big_endian(&mut output[32..]).unwrap();
-    }
-    Ok(PrecompileOutput::new(gas_cost, output.into()))
 }
 
 pub fn run_mul(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
-    if gas_cost > gas_limit {
-        return Err(Error::OutOfGas.into());
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "bn")] {
+            bn::run_mul(input, gas_cost, gas_limit)
+        } else {
+            matter_labs::run_mul(input, gas_cost, gas_limit)
+        }
     }
-
-    let input = right_pad::<MUL_INPUT_LEN>(input);
-
-    let p = read_point(&input[..64])?;
-
-    // `Fr::from_slice` can only fail when the length is not 32.
-    let fr = bn::Fr::from_slice(&input[64..96]).unwrap();
-
-    let mut output = [0u8; 64];
-    if let Some(mul) = AffineG1::from_jacobian(p * fr) {
-        mul.x().to_big_endian(&mut output[..32]).unwrap();
-        mul.y().to_big_endian(&mut output[32..]).unwrap();
-    }
-    Ok(PrecompileOutput::new(gas_cost, output.into()))
 }
 
 pub fn run_pair(
@@ -165,54 +103,222 @@ pub fn run_pair(
     pair_base_cost: u64,
     gas_limit: u64,
 ) -> PrecompileResult {
-    let gas_used = (input.len() / PAIR_ELEMENT_LEN) as u64 * pair_per_point_cost + pair_base_cost;
-    if gas_used > gas_limit {
-        return Err(Error::OutOfGas.into());
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "bn")] {
+            bn::run_pair(input, pair_per_point_cost, pair_base_cost, gas_limit)
+        } else {
+            matter_labs::run_pair(input, pair_per_point_cost, pair_base_cost, gas_limit)
+        }
     }
+}
 
-    if input.len() % PAIR_ELEMENT_LEN != 0 {
-        return Err(Error::Bn128PairLength.into());
-    }
+#[cfg(not(feature = "bn"))]
+mod matter_labs {
+    use super::PAIR_ELEMENT_LEN;
+    use crate::{Error, PrecompileOutput, PrecompileResult};
+    use eth_pairings::public_interface::eip196::EIP196Executor;
+    use std::string::ToString;
 
-    let success = if input.is_empty() {
-        true
-    } else {
-        let elements = input.len() / PAIR_ELEMENT_LEN;
-
-        let mut mul = Gt::one();
-        for idx in 0..elements {
-            let read_fq_at = |n: usize| {
-                debug_assert!(n < PAIR_ELEMENT_LEN / 32);
-                let start = idx * PAIR_ELEMENT_LEN + n * 32;
-                // SAFETY: We're reading `6 * 32 == PAIR_ELEMENT_LEN` bytes from `input[idx..]`
-                // per iteration. This is guaranteed to be in-bounds.
-                let slice = unsafe { input.get_unchecked(start..start + 32) };
-                Fq::from_slice(slice).map_err(|_| Error::Bn128FieldPointNotAMember)
-            };
-            let ax = read_fq_at(0)?;
-            let ay = read_fq_at(1)?;
-            let bay = read_fq_at(2)?;
-            let bax = read_fq_at(3)?;
-            let bby = read_fq_at(4)?;
-            let bbx = read_fq_at(5)?;
-
-            let a = new_g1_point(ax, ay)?;
-            let b = {
-                let ba = Fq2::new(bax, bay);
-                let bb = Fq2::new(bbx, bby);
-                if ba.is_zero() && bb.is_zero() {
-                    G2::zero()
-                } else {
-                    G2::from(AffineG2::new(ba, bb).map_err(|_| Error::Bn128AffineGFailedToCreate)?)
-                }
-            };
-
-            mul = mul * bn::pairing(a, b);
+    pub(crate) fn run_add(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
+        if gas_cost > gas_limit {
+            return Err(Error::OutOfGas.into());
         }
 
-        mul == Gt::one()
+        let res = EIP196Executor::add(input);
+        match res {
+            Ok(res) => Ok(PrecompileOutput::new(gas_cost, res.into())),
+            Err(e) => Err(Error::Other(e.to_string()).into()),
+        }
+    }
+
+    pub(crate) fn run_mul(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
+        if gas_cost > gas_limit {
+            return Err(Error::OutOfGas.into());
+        }
+
+        let res = EIP196Executor::mul(input);
+        match res {
+            Ok(res) => Ok(PrecompileOutput::new(gas_cost, res.into())),
+            Err(e) => Err(Error::Other(e.to_string()).into()),
+        }
+    }
+
+    pub(crate) fn run_pair(
+        input: &[u8],
+        pair_per_point_cost: u64,
+        pair_base_cost: u64,
+        gas_limit: u64,
+    ) -> PrecompileResult {
+        let gas_used =
+            (input.len() / PAIR_ELEMENT_LEN) as u64 * pair_per_point_cost + pair_base_cost;
+        if gas_used > gas_limit {
+            return Err(Error::OutOfGas.into());
+        }
+
+        if input.len() % PAIR_ELEMENT_LEN != 0 {
+            return Err(Error::Bn128PairLength.into());
+        }
+
+        let res = EIP196Executor::pair(input);
+
+        let success = match res {
+            Ok(res) => res.into(),
+            Err(e) => return Err(Error::Other(e.to_string()).into()),
+        };
+
+        Ok(PrecompileOutput::new(gas_used, success))
+    }
+}
+
+#[cfg(feature = "bn")]
+mod bn {
+    use super::PAIR_ELEMENT_LEN;
+    use crate::{
+        utilities::{bool_to_bytes32, right_pad},
+        Error, PrecompileOutput, PrecompileResult,
     };
-    Ok(PrecompileOutput::new(gas_used, bool_to_bytes32(success)))
+    use bn::{AffineG1, AffineG2, Fq, Fq2, Group, Gt, G1, G2};
+
+    // Silence the unused crate dependency warning.
+    use eth_pairings as _;
+
+    /// Input length for the add operation.
+    /// `ADD` takes two uncompressed G1 points (64 bytes each).
+    const ADD_INPUT_LEN: usize = 64 + 64;
+
+    /// Input length for the multiplication operation.
+    /// `MUL` takes an uncompressed G1 point (64 bytes) and scalar (32 bytes).
+    const MUL_INPUT_LEN: usize = 64 + 32;
+
+    /// Reads a single `Fq` from the input slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the input is not at least 32 bytes long.
+    #[inline]
+    fn read_fq(input: &[u8]) -> Result<Fq, Error> {
+        Fq::from_slice(&input[..32]).map_err(|_| Error::Bn128FieldPointNotAMember)
+    }
+
+    /// Reads the `x` and `y` points from the input slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the input is not at least 64 bytes long.
+    #[inline]
+    fn read_point(input: &[u8]) -> Result<G1, Error> {
+        let px = read_fq(&input[0..32])?;
+        let py = read_fq(&input[32..64])?;
+        new_g1_point(px, py)
+    }
+
+    /// Creates a new `G1` point from the given `x` and `y` coordinates.
+    fn new_g1_point(px: Fq, py: Fq) -> Result<G1, Error> {
+        if px == Fq::zero() && py == Fq::zero() {
+            Ok(G1::zero())
+        } else {
+            AffineG1::new(px, py)
+                .map(Into::into)
+                .map_err(|_| Error::Bn128AffineGFailedToCreate)
+        }
+    }
+
+    pub(crate) fn run_add(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
+        if gas_cost > gas_limit {
+            return Err(Error::OutOfGas.into());
+        }
+
+        let input = right_pad::<ADD_INPUT_LEN>(input);
+
+        let p1 = read_point(&input[..64])?;
+        let p2 = read_point(&input[64..])?;
+
+        let mut output = [0u8; 64];
+        if let Some(sum) = AffineG1::from_jacobian(p1 + p2) {
+            sum.x().to_big_endian(&mut output[..32]).unwrap();
+            sum.y().to_big_endian(&mut output[32..]).unwrap();
+        }
+        Ok(PrecompileOutput::new(gas_cost, output.into()))
+    }
+
+    pub(crate) fn run_mul(input: &[u8], gas_cost: u64, gas_limit: u64) -> PrecompileResult {
+        if gas_cost > gas_limit {
+            return Err(Error::OutOfGas.into());
+        }
+
+        let input = right_pad::<MUL_INPUT_LEN>(input);
+
+        let p = read_point(&input[..64])?;
+
+        // `Fr::from_slice` can only fail when the length is not 32.
+        let fr = bn::Fr::from_slice(&input[64..96]).unwrap();
+
+        let mut output = [0u8; 64];
+        if let Some(mul) = AffineG1::from_jacobian(p * fr) {
+            mul.x().to_big_endian(&mut output[..32]).unwrap();
+            mul.y().to_big_endian(&mut output[32..]).unwrap();
+        }
+        Ok(PrecompileOutput::new(gas_cost, output.into()))
+    }
+
+    pub(crate) fn run_pair(
+        input: &[u8],
+        pair_per_point_cost: u64,
+        pair_base_cost: u64,
+        gas_limit: u64,
+    ) -> PrecompileResult {
+        let gas_used =
+            (input.len() / PAIR_ELEMENT_LEN) as u64 * pair_per_point_cost + pair_base_cost;
+        if gas_used > gas_limit {
+            return Err(Error::OutOfGas.into());
+        }
+
+        if input.len() % PAIR_ELEMENT_LEN != 0 {
+            return Err(Error::Bn128PairLength.into());
+        }
+
+        let success = if input.is_empty() {
+            true
+        } else {
+            let elements = input.len() / PAIR_ELEMENT_LEN;
+
+            let mut mul = Gt::one();
+            for idx in 0..elements {
+                let read_fq_at = |n: usize| {
+                    debug_assert!(n < PAIR_ELEMENT_LEN / 32);
+                    let start = idx * PAIR_ELEMENT_LEN + n * 32;
+                    // SAFETY: We're reading `6 * 32 == PAIR_ELEMENT_LEN` bytes from `input[idx..]`
+                    // per iteration. This is guaranteed to be in-bounds.
+                    let slice = unsafe { input.get_unchecked(start..start + 32) };
+                    Fq::from_slice(slice).map_err(|_| Error::Bn128FieldPointNotAMember)
+                };
+                let ax = read_fq_at(0)?;
+                let ay = read_fq_at(1)?;
+                let bay = read_fq_at(2)?;
+                let bax = read_fq_at(3)?;
+                let bby = read_fq_at(4)?;
+                let bbx = read_fq_at(5)?;
+
+                let a = new_g1_point(ax, ay)?;
+                let b = {
+                    let ba = Fq2::new(bax, bay);
+                    let bb = Fq2::new(bbx, bby);
+                    if ba.is_zero() && bb.is_zero() {
+                        G2::zero()
+                    } else {
+                        G2::from(
+                            AffineG2::new(ba, bb).map_err(|_| Error::Bn128AffineGFailedToCreate)?,
+                        )
+                    }
+                };
+
+                mul = mul * bn::pairing(a, b);
+            }
+
+            mul == Gt::one()
+        };
+        Ok(PrecompileOutput::new(gas_used, bool_to_bytes32(success)))
+    }
 }
 
 #[cfg(test)]
@@ -220,7 +326,8 @@ mod tests {
     use crate::bn128::add::BYZANTIUM_ADD_GAS_COST;
     use crate::bn128::mul::BYZANTIUM_MUL_GAS_COST;
     use crate::bn128::pair::{BYZANTIUM_PAIR_BASE, BYZANTIUM_PAIR_PER_POINT};
-    use revm_primitives::{hex, PrecompileErrors};
+    use crate::Error;
+    use revm_primitives::{hex, PrecompileError, PrecompileErrors};
 
     use super::*;
 
@@ -300,10 +407,19 @@ mod tests {
         .unwrap();
 
         let res = run_add(&input, BYZANTIUM_ADD_GAS_COST, 500);
-        assert!(matches!(
-            res,
-            Err(PrecompileErrors::Error(Error::Bn128AffineGFailedToCreate))
-        ));
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "bn")] {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Bn128AffineGFailedToCreate)),
+                ));
+            } else {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Other(..))),
+                ));
+            }
+        }
     }
 
     #[test]
@@ -377,10 +493,19 @@ mod tests {
         .unwrap();
 
         let res = run_mul(&input, BYZANTIUM_MUL_GAS_COST, 40_000);
-        assert!(matches!(
-            res,
-            Err(PrecompileErrors::Error(Error::Bn128AffineGFailedToCreate))
-        ));
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "bn")] {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Bn128AffineGFailedToCreate)),
+                ));
+            } else {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Other(..))),
+                ));
+            }
+        }
     }
 
     #[test]
@@ -438,6 +563,7 @@ mod tests {
             BYZANTIUM_PAIR_BASE,
             259_999,
         );
+
         assert!(matches!(res, Err(PrecompileErrors::Error(Error::OutOfGas))));
 
         // no input test
@@ -473,10 +599,20 @@ mod tests {
             BYZANTIUM_PAIR_BASE,
             260_000,
         );
-        assert!(matches!(
-            res,
-            Err(PrecompileErrors::Error(Error::Bn128AffineGFailedToCreate))
-        ));
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "bn")] {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Bn128AffineGFailedToCreate)),
+                ));
+            } else {
+                assert!(matches!(
+                    res,
+                    Err(PrecompileErrors::Error(PrecompileError::Other(..))),
+                ));
+            }
+        }
 
         // invalid input length
         let input = hex::decode(
