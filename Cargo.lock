@@ -3247,12 +3247,12 @@ name = "revme"
 version = "0.7.0"
 dependencies = [
  "alloy-rlp",
+ "criterion",
  "hash-db",
  "hashbrown",
  "hex",
  "indicatif",
  "k256",
- "microbench",
  "plain_hasher",
  "revm",
  "serde",
