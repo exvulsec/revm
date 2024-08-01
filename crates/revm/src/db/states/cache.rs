@@ -150,6 +150,7 @@ impl CacheState {
         // EIP-161 state clear
         if is_empty {
             if self.has_state_clear {
+                println!("touch empty account {address:?}");
                 // touch empty account.
                 this_account.touch_empty_eip161()
             } else {
