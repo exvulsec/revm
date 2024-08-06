@@ -5,33 +5,31 @@
 use crate::{
     precompile::PrecompileSpecId,
     primitives::{
-        db::Database,
-        Account, EVMError, Env, Spec,
-        SpecId::{CANCUN, PRAGUE, SHANGHAI},
-        TxKind, BLOCKHASH_STORAGE_ADDRESS, KECCAK_EMPTY, U256,
+        Account, Block, EVMError, EVMResultGeneric, EnvWiring, Spec, SpecId, Transaction,
+        BLOCKHASH_STORAGE_ADDRESS, KECCAK_EMPTY, U256,
     },
-    Context, ContextPrecompiles,
+    Context, ContextPrecompiles, EvmWiring,
 };
 use std::vec::Vec;
 
 /// Main precompile load
 #[inline]
-pub fn load_precompiles<SPEC: Spec, DB: Database>() -> ContextPrecompiles<DB> {
+pub fn load_precompiles<EvmWiringT: EvmWiring, SPEC: Spec>() -> ContextPrecompiles<EvmWiringT> {
     ContextPrecompiles::new(PrecompileSpecId::from_spec_id(SPEC::SPEC_ID))
 }
 
 /// Main load handle
 #[inline]
-pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
-    context: &mut Context<EXT, DB>,
-) -> Result<(), EVMError<DB::Error>> {
+pub fn load_accounts<EvmWiringT: EvmWiring, SPEC: Spec>(
+    context: &mut Context<EvmWiringT>,
+) -> EVMResultGeneric<(), EvmWiringT> {
     // set journaling state flag.
     context.evm.journaled_state.set_spec_id(SPEC::SPEC_ID);
 
     // load coinbase
     // EIP-3651: Warm COINBASE. Starts the `COINBASE` address warm
-    if SPEC::enabled(SHANGHAI) {
-        let coinbase = context.evm.inner.env.block.coinbase;
+    if SPEC::enabled(SpecId::SHANGHAI) {
+        let coinbase = *context.evm.inner.env.block.coinbase();
         context
             .evm
             .journaled_state
@@ -41,7 +39,7 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
 
     // Load blockhash storage address
     // EIP-2935: Serve historical block hashes from state
-    if SPEC::enabled(PRAGUE) {
+    if SPEC::enabled(SpecId::PRAGUE) {
         context
             .evm
             .journaled_state
@@ -50,8 +48,8 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
     }
 
     // EIP-7702. Load bytecode to authorized accounts.
-    if SPEC::enabled(PRAGUE) {
-        if let Some(authorization_list) = context.evm.inner.env.tx.authorization_list.as_ref() {
+    if SPEC::enabled(SpecId::PRAGUE) {
+        if let Some(authorization_list) = context.evm.inner.env.tx.authorization_list().as_ref() {
             let mut valid_auths = Vec::with_capacity(authorization_list.len());
             for authorization in authorization_list.recovered_iter() {
                 // 1. recover authority and authorized addresses.
@@ -71,7 +69,8 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
                     .evm
                     .inner
                     .journaled_state
-                    .load_account(authority, &mut context.evm.inner.db)?;
+                    .load_account(authority, &mut context.evm.inner.db)
+                    .map_err(EVMError::Database)?;
 
                 // 3. Verify that the code of authority is empty.
                 // In case of multiple same authorities this step will skip loading of
@@ -93,7 +92,9 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
                     .evm
                     .inner
                     .journaled_state
-                    .load_code(authorization.address, &mut context.evm.inner.db)?;
+                    .load_code(authorization.address, &mut context.evm.inner.db)
+                    .map_err(EVMError::Database)?;
+
                 let code = account.info.code.clone();
                 let code_hash = account.info.code_hash;
 
@@ -117,19 +118,22 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
         }
     }
 
-    context.evm.load_access_list()?;
+    context.evm.load_access_list().map_err(EVMError::Database)?;
     Ok(())
 }
 
 /// Helper function that deducts the caller balance.
 #[inline]
-pub fn deduct_caller_inner<SPEC: Spec>(caller_account: &mut Account, env: &Env) {
+pub fn deduct_caller_inner<EvmWiringT: EvmWiring, SPEC: Spec>(
+    caller_account: &mut Account,
+    env: &EnvWiring<EvmWiringT>,
+) {
     // Subtract gas costs from the caller's account.
     // We need to saturate the gas cost to prevent underflow in case that `disable_balance_check` is enabled.
-    let mut gas_cost = U256::from(env.tx.gas_limit).saturating_mul(env.effective_gas_price());
+    let mut gas_cost = U256::from(env.tx.gas_limit()).saturating_mul(env.effective_gas_price());
 
     // EIP-4844
-    if SPEC::enabled(CANCUN) {
+    if SPEC::enabled(SpecId::CANCUN) {
         let data_fee = env.calc_data_fee().expect("already checked");
         gas_cost = gas_cost.saturating_add(data_fee);
     }
@@ -138,7 +142,7 @@ pub fn deduct_caller_inner<SPEC: Spec>(caller_account: &mut Account, env: &Env) 
     caller_account.info.balance = caller_account.info.balance.saturating_sub(gas_cost);
 
     // bump the nonce for calls. Nonce for CREATE will be bumped in `handle_create`.
-    if matches!(env.tx.transact_to, TxKind::Call(_)) {
+    if env.tx.kind().is_call() {
         // Nonce is already checked
         caller_account.info.nonce = caller_account.info.nonce.saturating_add(1);
     }
@@ -149,18 +153,22 @@ pub fn deduct_caller_inner<SPEC: Spec>(caller_account: &mut Account, env: &Env) 
 
 /// Deducts the caller balance to the transaction limit.
 #[inline]
-pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
-    context: &mut Context<EXT, DB>,
-) -> Result<(), EVMError<DB::Error>> {
+pub fn deduct_caller<EvmWiringT: EvmWiring, SPEC: Spec>(
+    context: &mut Context<EvmWiringT>,
+) -> EVMResultGeneric<(), EvmWiringT> {
     // load caller's account.
     let (caller_account, _) = context
         .evm
         .inner
         .journaled_state
-        .load_account(context.evm.inner.env.tx.caller, &mut context.evm.inner.db)?;
+        .load_account(
+            *context.evm.inner.env.tx.caller(),
+            &mut context.evm.inner.db,
+        )
+        .map_err(EVMError::Database)?;
 
     // deduct gas cost from caller's account.
-    deduct_caller_inner::<SPEC>(caller_account, &context.evm.inner.env);
+    deduct_caller_inner::<EvmWiringT, SPEC>(caller_account, &context.evm.inner.env);
 
     Ok(())
 }

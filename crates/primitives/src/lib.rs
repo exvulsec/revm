@@ -7,17 +7,20 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 
-mod bytecode;
-mod constants;
+pub mod block;
 pub mod db;
 pub mod env;
 
+mod bytecode;
+mod constants;
+mod evm_wiring;
 #[cfg(any(feature = "c-kzg", feature = "kzg-rs"))]
 pub mod kzg;
 pub mod precompile;
 pub mod result;
 pub mod specification;
 pub mod state;
+pub mod transaction;
 pub mod utilities;
 pub use alloy_eips::eip2930::{AccessList, AccessListItem};
 pub use alloy_primitives::{
@@ -28,6 +31,7 @@ pub use bitvec;
 pub use bytecode::*;
 pub use constants::*;
 pub use env::*;
+pub use evm_wiring::*;
 
 cfg_if::cfg_if! {
     if #[cfg(all(not(feature = "hashbrown"), feature = "std"))] {
@@ -38,12 +42,14 @@ cfg_if::cfg_if! {
     }
 }
 
+pub use block::Block;
 #[cfg(any(feature = "c-kzg", feature = "kzg-rs"))]
 pub use kzg::{EnvKzgSettings, KzgSettings};
 pub use precompile::*;
 pub use result::*;
 pub use specification::*;
 pub use state::*;
+pub use transaction::Transaction;
 pub use utilities::*;
 
 #[cfg(all(feature = "c-kzg", feature = "kzg-rs"))]
