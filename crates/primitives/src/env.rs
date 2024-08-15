@@ -1,15 +1,11 @@
-pub mod eip7702;
 pub mod handler_cfg;
 
-pub use eip7702::{
-    Authorization, AuthorizationList, RecoveredAuthorization, Signature, SignedAuthorization,
-};
 pub use handler_cfg::{CfgEnvWithHandlerCfg, EnvWithHandlerCfg, HandlerCfg};
 
 use crate::{
-    calc_blob_gasprice, AccessListItem, Account, Address, Bytes, InvalidHeader, InvalidTransaction,
-    Spec, SpecId, B256, GAS_PER_BLOB, KECCAK_EMPTY, MAX_BLOB_NUMBER_PER_BLOCK, MAX_CODE_SIZE,
-    MAX_INITCODE_SIZE, U256, VERSIONED_HASH_VERSION_KZG,
+    calc_blob_gasprice, AccessListItem, Account, Address, AuthorizationList, Bytes, InvalidHeader,
+    InvalidTransaction, Spec, SpecId, B256, GAS_PER_BLOB, KECCAK_EMPTY, MAX_BLOB_NUMBER_PER_BLOCK,
+    MAX_CODE_SIZE, MAX_INITCODE_SIZE, U256, VERSIONED_HASH_VERSION_KZG,
 };
 use alloy_primitives::TxKind;
 use core::cmp::{min, Ordering};
@@ -200,7 +196,17 @@ impl Env {
             return Err(InvalidTransaction::AuthorizationListNotSupported);
         }
 
-        if self.tx.authorization_list.is_some() {
+        if let Some(auth_list) = &self.tx.authorization_list {
+            // The transaction is considered invalid if the length of authorization_list is zero.
+            if auth_list.is_empty() {
+                return Err(InvalidTransaction::EmptyAuthorizationList);
+            }
+
+            // Check validity of authorization_list
+            if !auth_list.is_valid() {
+                return Err(InvalidTransaction::InvalidAuthorizationList);
+            }
+
             // Check if other fields are unset.
             if self.tx.max_fee_per_blob_gas.is_some() || !self.tx.blob_hashes.is_empty() {
                 return Err(InvalidTransaction::AuthorizationListInvalidFields);

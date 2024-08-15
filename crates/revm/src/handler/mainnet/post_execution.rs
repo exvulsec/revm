@@ -1,8 +1,7 @@
 use crate::{
     interpreter::{Gas, SuccessOrHalt},
     primitives::{
-        db::Database, Bytecode, EVMError, ExecutionResult, ResultAndState, Spec, SpecId::LONDON,
-        KECCAK_EMPTY, U256,
+        db::Database, EVMError, ExecutionResult, ResultAndState, Spec, SpecId::LONDON, U256,
     },
     Context, FrameResult,
 };
@@ -22,9 +21,6 @@ pub fn clear<EXT, DB: Database>(context: &mut Context<EXT, DB>) {
     // clear error and journaled state.
     let _ = context.evm.take_error();
     context.evm.inner.journaled_state.clear();
-    // Clear valid authorizations after each transaction.
-    // If transaction is valid they are consumed in `output` handler.
-    context.evm.inner.valid_authorizations.clear();
 }
 
 /// Reward beneficiary with gas fee.
@@ -44,14 +40,15 @@ pub fn reward_beneficiary<SPEC: Spec, EXT, DB: Database>(
         effective_gas_price
     };
 
-    let (coinbase_account, _) = context
+    let coinbase_account = context
         .evm
         .inner
         .journaled_state
         .load_account(beneficiary, &mut context.evm.inner.db)?;
 
-    coinbase_account.mark_touch();
-    coinbase_account.info.balance = coinbase_account
+    coinbase_account.data.mark_touch();
+    coinbase_account.data.info.balance = coinbase_account
+        .data
         .info
         .balance
         .saturating_add(coinbase_gas_price * U256::from(gas.spent() - gas.refunded() as u64));
@@ -68,16 +65,16 @@ pub fn reimburse_caller<SPEC: Spec, EXT, DB: Database>(
     let effective_gas_price = context.evm.env.effective_gas_price();
 
     // return balance of not spend gas.
-    let (caller_account, _) = context
+    let caller_account = context
         .evm
         .inner
         .journaled_state
         .load_account(caller, &mut context.evm.inner.db)?;
 
-    caller_account.info.balance = caller_account
-        .info
-        .balance
-        .saturating_add(effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64));
+    caller_account.data.info.balance =
+        caller_account.data.info.balance.saturating_add(
+            effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64),
+        );
 
     Ok(())
 }
@@ -96,16 +93,7 @@ pub fn output<EXT, DB: Database>(
     let instruction_result = result.into_interpreter_result();
 
     // reset journal and return present state.
-    let (mut state, logs) = context.evm.journaled_state.finalize();
-
-    // clear code of authorized accounts.
-    for authorized in core::mem::take(&mut context.evm.inner.valid_authorizations).into_iter() {
-        let account = state
-            .get_mut(&authorized)
-            .expect("Authorized account must exist");
-        account.info.code = Some(Bytecode::default());
-        account.info.code_hash = KECCAK_EMPTY;
-    }
+    let (state, logs) = context.evm.journaled_state.finalize();
 
     let result = match instruction_result.result.into() {
         SuccessOrHalt::Success(reason) => ExecutionResult::Success {

@@ -340,6 +340,9 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
         let gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
 
+        // apply EIP-7702 auth list.
+        let eip7702_gas_refund = pre_exec.apply_eip7702_auth_list(ctx)? as i64;
+
         let exec = self.handler.execution();
         // call inner handling of call/create
         let first_frame_or_result = match ctx.evm.env.tx.transact_to {
@@ -365,6 +368,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
                 }
             }
         };
+
         // Starts the main running loop.
         let mut result = match first_frame_or_result {
             FrameOrResult::Frame(first_frame) => self.run_the_loop(first_frame)?,
@@ -372,6 +376,9 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         };
 
         let ctx = &mut self.context;
+
+        // add refund from EIP-7702.
+        result.gas_mut().record_refund(eip7702_gas_refund);
 
         // handle output of call/create calls.
         self.handler
@@ -385,5 +392,55 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         post_exec.reward_beneficiary(ctx, result.gas())?;
         // Returns output of transaction.
         post_exec.output(ctx, result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::{
+        db::BenchmarkDB,
+        interpreter::opcode::{PUSH1, SSTORE},
+        primitives::{address, Authorization, Bytecode, RecoveredAuthorization, U256},
+    };
+
+    #[test]
+    fn sanity_eip7702_tx() {
+        let delegate = address!("0000000000000000000000000000000000000000");
+        let caller = address!("0000000000000000000000000000000000000001");
+        let auth = address!("0000000000000000000000000000000000000100");
+
+        let bytecode = Bytecode::new_legacy([PUSH1, 0x01, PUSH1, 0x01, SSTORE].into());
+
+        let mut evm = Evm::builder()
+            .with_spec_id(SpecId::PRAGUE)
+            .with_db(BenchmarkDB::new_bytecode(bytecode))
+            .modify_tx_env(|tx| {
+                tx.authorization_list = Some(
+                    vec![RecoveredAuthorization::new_unchecked(
+                        Authorization {
+                            chain_id: U256::from(1),
+                            address: delegate,
+                            nonce: 0,
+                        },
+                        Some(auth),
+                    )]
+                    .into(),
+                );
+                tx.caller = caller;
+                tx.transact_to = TxKind::Call(auth);
+            })
+            .build();
+
+        let ok = evm.transact().unwrap();
+
+        let auth_acc = ok.state.get(&auth).unwrap();
+        assert_eq!(auth_acc.info.code, Some(Bytecode::new_eip7702(delegate)));
+        assert_eq!(auth_acc.info.nonce, 1);
+        assert_eq!(
+            auth_acc.storage.get(&U256::from(1)).unwrap().present_value,
+            U256::from(1)
+        );
     }
 }

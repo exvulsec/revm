@@ -2,7 +2,7 @@ use super::constants::*;
 use crate::{
     num_words,
     primitives::{AccessListItem, SpecId, U256},
-    SelfDestructResult,
+    AccountLoad, Eip7702CodeLoad, SelfDestructResult, StateLoad,
 };
 
 /// `const` Option `?`.
@@ -123,9 +123,9 @@ pub const fn verylowcopy_cost(len: u64) -> Option<u64> {
 
 /// `EXTCODECOPY` opcode cost calculation.
 #[inline]
-pub const fn extcodecopy_cost(spec_id: SpecId, len: u64, is_cold: bool) -> Option<u64> {
+pub const fn extcodecopy_cost(spec_id: SpecId, len: u64, load: Eip7702CodeLoad<()>) -> Option<u64> {
     let base_gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        warm_cold_cost(is_cold)
+        warm_cold_cost_with_delegation(load)
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         700
     } else {
@@ -251,12 +251,12 @@ fn frontier_sstore_cost(current: U256, new: U256) -> u64 {
 
 /// `SELFDESTRUCT` opcode cost calculation.
 #[inline]
-pub const fn selfdestruct_cost(spec_id: SpecId, res: SelfDestructResult) -> u64 {
+pub const fn selfdestruct_cost(spec_id: SpecId, res: StateLoad<SelfDestructResult>) -> u64 {
     // EIP-161: State trie clearing (invariant-preserving alternative)
     let should_charge_topup = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
-        res.had_value && !res.target_exists
+        res.data.had_value && !res.data.target_exists
     } else {
-        !res.target_exists
+        !res.data.target_exists
     };
 
     // EIP-150: Gas cost changes for IO-heavy operations
@@ -289,15 +289,10 @@ pub const fn selfdestruct_cost(spec_id: SpecId, res: SelfDestructResult) -> u64 
 /// * If account is not existing and needs to be created. After Spurious dragon
 ///   this is only accounted if value is transferred.
 #[inline]
-pub const fn call_cost(
-    spec_id: SpecId,
-    transfers_value: bool,
-    is_cold: bool,
-    new_account_accounting: bool,
-) -> u64 {
+pub const fn call_cost(spec_id: SpecId, transfers_value: bool, account_load: AccountLoad) -> u64 {
     // Account access.
     let mut gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        warm_cold_cost(is_cold)
+        warm_cold_cost_with_delegation(account_load.load)
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         // EIP-150: Gas cost changes for IO-heavy operations
         700
@@ -311,7 +306,7 @@ pub const fn call_cost(
     }
 
     // new account cost
-    if new_account_accounting {
+    if account_load.is_empty {
         // EIP-161: State trie clearing (invariant-preserving alternative)
         if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
             // account only if there is value transferred.
@@ -334,6 +329,18 @@ pub const fn warm_cold_cost(is_cold: bool) -> u64 {
     } else {
         WARM_STORAGE_READ_COST
     }
+}
+
+/// Berlin warm and cold storage access cost for account access.
+///
+/// If delegation is Some, add additional cost for delegation account load.
+#[inline]
+pub const fn warm_cold_cost_with_delegation(load: Eip7702CodeLoad<()>) -> u64 {
+    let mut gas = warm_cold_cost(load.state_load.is_cold);
+    if let Some(is_cold) = load.is_delegate_account_cold {
+        gas += warm_cold_cost(is_cold);
+    }
+    gas
 }
 
 /// Memory expansion cost calculation for a given memory length.

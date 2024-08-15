@@ -191,7 +191,7 @@ pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
     context: &mut Context<EXT, DB>,
 ) -> Result<(), EVMError<DB::Error>> {
     // load caller's account.
-    let (caller_account, _) = context
+    let mut caller_account = context
         .evm
         .inner
         .journaled_state
@@ -206,7 +206,7 @@ pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
 
     // We deduct caller max balance after minting and before deducing the
     // l1 cost, max values is already checked in pre_validate but l1 cost wasn't.
-    deduct_caller_inner::<SPEC>(caller_account, &context.evm.inner.env);
+    deduct_caller_inner::<SPEC>(caller_account.data, &context.evm.inner.env);
 
     // If the transaction is not a deposit transaction, subtract the L1 data fee from the
     // caller's balance directly after minting the requested amount of ETH.
@@ -269,7 +269,7 @@ pub fn reward_beneficiary<SPEC: Spec, EXT, DB: Database>(
         let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, SPEC::SPEC_ID);
 
         // Send the L1 cost of the transaction to the L1 Fee Vault.
-        let (l1_fee_vault_account, _) = context
+        let mut l1_fee_vault_account = context
             .evm
             .inner
             .journaled_state
@@ -278,7 +278,7 @@ pub fn reward_beneficiary<SPEC: Spec, EXT, DB: Database>(
         l1_fee_vault_account.info.balance += l1_cost;
 
         // Send the base fee of the transaction to the Base Fee Vault.
-        let (base_fee_vault_account, _) = context
+        let mut base_fee_vault_account = context
             .evm
             .inner
             .journaled_state
@@ -504,7 +504,7 @@ mod tests {
         deduct_caller::<RegolithSpec, (), _>(&mut context).unwrap();
 
         // Check the account balance is updated.
-        let (account, _) = context
+        let account = context
             .evm
             .inner
             .journaled_state
@@ -542,7 +542,7 @@ mod tests {
         deduct_caller::<RegolithSpec, (), _>(&mut context).unwrap();
 
         // Check the account balance is updated.
-        let (account, _) = context
+        let account = context
             .evm
             .inner
             .journaled_state
@@ -574,7 +574,7 @@ mod tests {
         deduct_caller::<RegolithSpec, (), _>(&mut context).unwrap();
 
         // Check the account balance is updated.
-        let (account, _) = context
+        let account = context
             .evm
             .inner
             .journaled_state
