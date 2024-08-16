@@ -117,6 +117,7 @@ pub fn apply_eip7702_auth_list<SPEC: Spec, EXT, DB: Database>(
         // 1. recover authority and authorized addresses.
         // authority = ecrecover(keccak(MAGIC || rlp([chain_id, address, nonce])), y_parity, r, s]
         let Some(authority) = authorization.authority() else {
+            println!("No authority");
             continue;
         };
 
@@ -124,6 +125,11 @@ pub fn apply_eip7702_auth_list<SPEC: Spec, EXT, DB: Database>(
         if !authorization.chain_id().is_zero()
             && authorization.chain_id() != U256::from(context.evm.inner.env.cfg.chain_id)
         {
+            println!(
+                "Chain id mismatch: {:?} != {:?}",
+                authorization.chain_id(),
+                context.evm.inner.env.cfg.chain_id
+            );
             continue;
         }
 
@@ -139,12 +145,22 @@ pub fn apply_eip7702_auth_list<SPEC: Spec, EXT, DB: Database>(
         if let Some(bytecode) = &authority_acc.info.code {
             // if it is not empty and it is not eip7702
             if !bytecode.is_empty() && !bytecode.is_eip7702() {
+                println!(
+                    "Not empty and not eip7702: {:?} {:?}",
+                    bytecode.len(),
+                    bytecode.is_eip7702()
+                );
                 continue;
             }
         }
 
         // 5. Verify the nonce of authority is equal to nonce.
         if authorization.nonce() != authority_acc.info.nonce {
+            println!(
+                "Nonce mismatch: {:?} != {:?}",
+                authorization.nonce(),
+                authority_acc.info.nonce
+            );
             continue;
         }
 
